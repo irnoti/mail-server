@@ -13,6 +13,7 @@
 #   --api-ip IP         the IRNoti API server's address; the agent port is opened to this address only (recommended)
 #   --agent-port N      port of the management agent (default 8443)
 #   --redis-port N      port of this server's own Redis (default 6379; auto-moves to 6380 when another service already uses 6379)
+#   --webroot DIR       get the Let's Encrypt certificate through a web server that already owns port 80 (e.g. nginx serving DIR at /.well-known/acme-challenge/); nothing is stopped
 #   --self-signed       do not use Let's Encrypt (port 80 not reachable / testing); clients will see a certificate warning
 #   --skip-checks       continue even if DNS/port checks fail
 #   --force-os          allow an Ubuntu release other than 22.04/24.04 (untested: package versions and config syntax may differ)
@@ -22,7 +23,7 @@ set -Eeuo pipefail
 # IRNOTI_NO_SERVICES=1 (tests only): write every configuration but do not install packages, touch the firewall or start services.
 NO_SERVICES="${IRNOTI_NO_SERVICES:-}"
 
-HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0; FORCE_OS=0; REDIS_PORT=
+HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0; FORCE_OS=0; REDIS_PORT=; WEBROOT=
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR=/etc/irnoti-mail
 LOG=/var/log/irnoti-mail-install.log
@@ -33,7 +34,7 @@ warn() { printf '%sWARN:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
 die()  { printf '%sERROR:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO (see $LOG)"' ERR
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --api-ip) API_IP="${2:-}"; shift 2 ;;
     --agent-port) AGENT_PORT="${2:-}"; shift 2 ;;
     --redis-port) REDIS_PORT="${2:-}"; shift 2 ;;
+    --webroot) WEBROOT="${2:-}"; shift 2 ;;
     --self-signed) SELF_SIGNED=1; shift ;;
     --skip-checks) SKIP_CHECKS=1; shift ;;
     --force-os) FORCE_OS=1; shift ;;
@@ -111,10 +113,22 @@ fi
 # ── TLS certificate ───────────────────────────────────────────────────────────
 CERT_DIR=/etc/letsencrypt/live/$HOSTNAME_FQDN
 if [[ $SELF_SIGNED -eq 0 ]]; then
-  say "Requesting a Let's Encrypt certificate (port 80 must be reachable)"
-  systemctl stop nginx apache2 2>/dev/null || true
-  if ! certbot certonly --standalone -d "$HOSTNAME_FQDN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive; then
-    die "certificate request failed. Check the A record and that port 80 is open, or use --self-signed"
+  if [[ -s $CERT_DIR/fullchain.pem && -s $CERT_DIR/privkey.pem ]]; then
+    say "Reusing the existing Let's Encrypt certificate for $HOSTNAME_FQDN"
+  elif [[ -n $WEBROOT ]]; then
+    say "Requesting a Let's Encrypt certificate through the web server that owns port 80 (webroot $WEBROOT)"
+    [[ -d $WEBROOT ]] || die "--webroot $WEBROOT is not a directory"
+    certbot certonly --webroot -w "$WEBROOT" -d "$HOSTNAME_FQDN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive \
+      || die "certificate request failed. The web server must serve $WEBROOT at http://$HOSTNAME_FQDN/.well-known/acme-challenge/ (and the A record must point here)"
+  else
+    say "Requesting a Let's Encrypt certificate (port 80 must be reachable)"
+    # standalone needs port 80: pause a web server only if it is running, and always start it again
+    paused=()
+    for w in nginx apache2; do systemctl is-active --quiet "$w" 2>/dev/null && paused+=("$w"); done
+    ((${#paused[@]})) && warn "pausing ${paused[*]} for the certificate request (use --webroot to avoid this)" && systemctl stop "${paused[@]}"
+    rc=0; certbot certonly --standalone -d "$HOSTNAME_FQDN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive || rc=$?
+    ((${#paused[@]})) && systemctl start "${paused[@]}"
+    [[ $rc -eq 0 ]] || die "certificate request failed. Check the A record and that port 80 is open, or use --webroot / --self-signed"
   fi
   mkdir -p /etc/letsencrypt/renewal-hooks/deploy
   cat >/etc/letsencrypt/renewal-hooks/deploy/irnoti-mail <<'EOF'
