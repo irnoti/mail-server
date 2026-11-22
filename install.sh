@@ -191,7 +191,7 @@ mail_plugins {
 }
 
 quota_storage_size = 1G
-quota_storage_grace = 10%%
+quota_storage_grace = 10M
 
 service imap-login {
   inet_listener imap {
