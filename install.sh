@@ -295,7 +295,7 @@ protocol imap {
 }
 
 protocol pop3 {
-  pop3_uidl_format = %08Xu%08Xv
+  pop3_uidl_format = %{uidvalidity}-%{uid}
 }
 
 sieve_script personal {
