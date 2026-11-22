@@ -160,6 +160,157 @@ require ["fileinto"];
 # mail Rspamd marked as spam goes to Junk
 if header :contains "X-Spam-Status" "Yes" { fileinto "Junk"; stop; }
 EOF
+DOVECOT_VER="$(dovecot --version 2>/dev/null | cut -d. -f1-2 || true)"
+# IRNOTI_DOVECOT_24=1 forces the 2.4 syntax (tests only, when dovecot is not installed)
+if [[ "${IRNOTI_DOVECOT_24:-}" == 1 || "$DOVECOT_VER" == 2.[4-9] || "$DOVECOT_VER" == [3-9].* ]]; then
+# Dovecot 2.4 (Ubuntu 26.04+) rewrote the configuration syntax: versioned file, named passdb/userdb, boolset plugins, sieve_script blocks.
+cat >/etc/dovecot/dovecot.conf <<EOF
+dovecot_config_version = 2.4.0
+dovecot_storage_version = 2.4.0
+# Managed by IRNoti install.sh: put your own additions in /etc/dovecot/local.conf.
+protocols = imap pop3 lmtp sieve
+listen = *
+ssl = required
+ssl_server_cert_file = $TLS_CERT
+ssl_server_key_file = $TLS_KEY
+ssl_min_protocol = TLSv1.2
+auth_allow_cleartext = no
+auth_mechanisms = plain login
+auth_master_user_separator = *
+mail_driver = maildir
+mail_path = ~/Maildir
+mail_home = /var/vmail/%{user | domain}/%{user | username}
+mail_uid = vmail
+mail_gid = vmail
+first_valid_uid = 5000
+last_valid_uid = 5000
+log_path = syslog
+
+mail_plugins {
+  quota = yes
+}
+
+quota_storage_size = 1G
+quota_storage_grace = 10%%
+
+service imap-login {
+  inet_listener imap {
+    port = 0
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
+}
+
+service pop3-login {
+  inet_listener pop3 {
+    port = 0
+  }
+  inet_listener pop3s {
+    port = 995
+    ssl = yes
+  }
+}
+
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+
+service managesieve-login {
+  inet_listener sieve {
+    port = 4190
+  }
+}
+
+passdb master-users {
+  driver = passwd-file
+  passwd_file_path = /etc/dovecot/master-users
+  master = yes
+  result_success = continue
+}
+
+passdb users {
+  driver = passwd-file
+  passwd_file_path = /etc/dovecot/users
+}
+
+userdb users {
+  driver = passwd-file
+  passwd_file_path = /etc/dovecot/users
+  fields {
+    uid = vmail
+    gid = vmail
+    home = /var/vmail/%{user | domain}/%{user | username}
+  }
+}
+
+namespace inbox {
+  inbox = yes
+  mailbox Drafts {
+    special_use = \\Drafts
+    auto = subscribe
+  }
+  mailbox Junk {
+    special_use = \\Junk
+    auto = subscribe
+  }
+  mailbox Sent {
+    special_use = \\Sent
+    auto = subscribe
+  }
+  mailbox Trash {
+    special_use = \\Trash
+    auto = subscribe
+  }
+  mailbox Archive {
+    special_use = \\Archive
+    auto = subscribe
+  }
+}
+
+protocol lmtp {
+  mail_plugins {
+    sieve = yes
+  }
+}
+
+protocol imap {
+  mail_plugins {
+    imap_quota = yes
+  }
+  mail_max_userip_connections = 40
+}
+
+protocol pop3 {
+  pop3_uidl_format = %08Xu%08Xv
+}
+
+sieve_script personal {
+  path = ~/sieve
+  active_path = ~/.dovecot.sieve
+}
+
+sieve_script before {
+  type = before
+  path = /etc/dovecot/sieve/before.sieve
+}
+
+!include_try /etc/dovecot/local.conf
+EOF
+else
 cat >/etc/dovecot/dovecot.conf <<EOF
 # Managed by IRNoti install.sh: put your own additions in /etc/dovecot/local.conf.
 protocols = imap pop3 lmtp sieve
@@ -291,6 +442,7 @@ plugin {
 
 !include_try /etc/dovecot/local.conf
 EOF
+fi
 touch /etc/dovecot/local.conf
 # compiled only now: sievec reads dovecot.conf, which must already be the new, valid one (a re-run over a broken config would fail otherwise)
 sievec /etc/dovecot/sieve/before.sieve
