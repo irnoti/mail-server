@@ -14,13 +14,14 @@
 #   --agent-port N      port of the management agent (default 8443)
 #   --self-signed       do not use Let's Encrypt (port 80 not reachable / testing); clients will see a certificate warning
 #   --skip-checks       continue even if DNS/port checks fail
+#   --force-os          allow an Ubuntu release other than 22.04/24.04 (untested: package versions and config syntax may differ)
 #   --uninstall-agent   remove only the agent service (mail data is kept)
 #   -h, --help          this text
 set -Eeuo pipefail
 # IRNOTI_NO_SERVICES=1 (tests only): write every configuration but do not install packages, touch the firewall or start services.
 NO_SERVICES="${IRNOTI_NO_SERVICES:-}"
 
-HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0
+HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0; FORCE_OS=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR=/etc/irnoti-mail
 LOG=/var/log/irnoti-mail-install.log
@@ -31,7 +32,7 @@ warn() { printf '%sWARN:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
 die()  { printf '%sERROR:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO (see $LOG)"' ERR
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --agent-port) AGENT_PORT="${2:-}"; shift 2 ;;
     --self-signed) SELF_SIGNED=1; shift ;;
     --skip-checks) SKIP_CHECKS=1; shift ;;
+    --force-os) FORCE_OS=1; shift ;;
     --uninstall-agent)
       systemctl disable --now irnoti-mail-agent 2>/dev/null || true
       rm -f /etc/systemd/system/irnoti-mail-agent.service /usr/local/lib/irnoti-mail/irnoti-mail-agent.py
@@ -59,7 +61,12 @@ done
 exec > >(tee -a "$LOG") 2>&1
 
 . /etc/os-release
-case "${VERSION_ID:-}" in 22.04|24.04) ;; *) die "Ubuntu 22.04 or 24.04 is required (found ${PRETTY_NAME:-unknown})" ;; esac
+[[ "${ID:-}" == ubuntu ]] || die "Ubuntu is required (found ${PRETTY_NAME:-unknown})"
+case "${VERSION_ID:-}" in
+  22.04|24.04) ;;
+  *) if [[ $FORCE_OS -eq 1 ]]; then warn "Ubuntu ${VERSION_ID:-?} is untested; Dovecot/Postfix/Rspamd config may need changes (doveconf is checked before services start)"
+     else die "Ubuntu 22.04 or 24.04 is required (found ${PRETTY_NAME:-unknown}); use --force-os to try anyway"; fi ;;
+esac
 [[ -f "$SCRIPT_DIR/irnoti-mail-agent.py" ]] || die "irnoti-mail-agent.py must be next to install.sh"
 
 # ── pre-flight checks ─────────────────────────────────────────────────────────
