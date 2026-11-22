@@ -12,6 +12,7 @@
 #   --admin-email E     contact address for Let's Encrypt expiry notices and the postmaster alias
 #   --api-ip IP         the IRNoti API server's address; the agent port is opened to this address only (recommended)
 #   --agent-port N      port of the management agent (default 8443)
+#   --redis-port N      port of this server's own Redis (default 6379; auto-moves to 6380 when another service already uses 6379)
 #   --self-signed       do not use Let's Encrypt (port 80 not reachable / testing); clients will see a certificate warning
 #   --skip-checks       continue even if DNS/port checks fail
 #   --force-os          allow an Ubuntu release other than 22.04/24.04 (untested: package versions and config syntax may differ)
@@ -21,7 +22,7 @@ set -Eeuo pipefail
 # IRNOTI_NO_SERVICES=1 (tests only): write every configuration but do not install packages, touch the firewall or start services.
 NO_SERVICES="${IRNOTI_NO_SERVICES:-}"
 
-HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0; FORCE_OS=0
+HOSTNAME_FQDN=""; ADMIN_EMAIL=""; API_IP=""; AGENT_PORT=8443; SELF_SIGNED=0; SKIP_CHECKS=0; FORCE_OS=0; REDIS_PORT=
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR=/etc/irnoti-mail
 LOG=/var/log/irnoti-mail-install.log
@@ -32,7 +33,7 @@ warn() { printf '%sWARN:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
 die()  { printf '%sERROR:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO (see $LOG)"' ERR
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --admin-email) ADMIN_EMAIL="${2:-}"; shift 2 ;;
     --api-ip) API_IP="${2:-}"; shift 2 ;;
     --agent-port) AGENT_PORT="${2:-}"; shift 2 ;;
+    --redis-port) REDIS_PORT="${2:-}"; shift 2 ;;
     --self-signed) SELF_SIGNED=1; shift ;;
     --skip-checks) SKIP_CHECKS=1; shift ;;
     --force-os) FORCE_OS=1; shift ;;
@@ -57,6 +59,7 @@ done
 [[ "$HOSTNAME_FQDN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || die "--hostname must be a lower-case FQDN like mail.example.com"
 [[ "$ADMIN_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$ ]] || die "--admin-email is not a valid address"
 [[ "$AGENT_PORT" =~ ^[0-9]{2,5}$ ]] || die "--agent-port must be a number"
+[[ -z "$REDIS_PORT" || "$REDIS_PORT" =~ ^[0-9]{2,5}$ ]] || die "--redis-port must be a number"
 [[ -z "$API_IP" || "$API_IP" =~ ^[0-9a-fA-F.:/]+$ ]] || die "--api-ip must be an IP address or CIDR"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -94,6 +97,15 @@ if [[ -z $NO_SERVICES ]]; then
   apt-get install -y -qq postfix dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-sieve dovecot-managesieved \
     rspamd redis-server certbot ufw fail2ban openssl curl ca-certificates python3 >/dev/null
   hostnamectl set-hostname "$HOSTNAME_FQDN" || true
+fi
+
+# Redis: a host often already runs another Redis (e.g. in Docker) on 6379. Ours must not fight it, so it moves to its own port.
+if [[ -z $REDIS_PORT ]]; then
+  REDIS_PORT=6379
+  if ss -ltnp 2>/dev/null | grep -E ':6379 ' | grep -qv redis-server; then REDIS_PORT=6380; warn "port 6379 is used by another service: this server's Redis will use $REDIS_PORT"; fi
+fi
+if [[ -z $NO_SERVICES && -f /etc/redis/redis.conf ]]; then
+  sed -i -E "s/^port [0-9]+/port $REDIS_PORT/" /etc/redis/redis.conf
 fi
 
 # ── TLS certificate ───────────────────────────────────────────────────────────
@@ -516,8 +528,8 @@ use_domain = "header";
 # the selector/path above are the *fallback* rule in Rspamd (there is no per-domain table), so it must be on
 try_fallback = true;
 EOF
-cat >/etc/rspamd/local.d/redis.conf <<'EOF'
-servers = "127.0.0.1";
+cat >/etc/rspamd/local.d/redis.conf <<EOF
+servers = "127.0.0.1:$REDIS_PORT";
 EOF
 cat >/etc/rspamd/local.d/classifier-bayes.conf <<'EOF'
 autolearn = true;
